@@ -23,18 +23,18 @@ st.set_page_config(
 
 
 # ============================================================
-# TITLE
+# PAGE TITLE
 # ============================================================
 
 st.title("🔎 Bill / Invoice Search")
 
 st.caption(
-    "Search Bill / Invoice numbers across all uploaded Excel files."
+    "Search exact Bill / Invoice numbers across all uploaded Excel files."
 )
 
 
 # ============================================================
-# BASIC FUNCTIONS
+# BASIC HELPERS
 # ============================================================
 
 def is_blank(value):
@@ -68,12 +68,11 @@ def normalize_value(value):
 
         return str(value).strip()
 
-    # Everything else
     return str(value).strip()
 
 
 # ============================================================
-# NORMALIZE HEADER
+# HEADER NORMALIZATION
 # ============================================================
 
 def normalize_header(value):
@@ -88,21 +87,18 @@ def normalize_header(value):
 
     text = text.strip().lower()
 
-    # Remove common separators
     text = re.sub(
         r"[_\-/\\.:]+",
         " ",
         text
     )
 
-    # Remove punctuation
     text = re.sub(
         r"[^\w\s]",
         " ",
         text
     )
 
-    # Multiple spaces
     text = re.sub(
         r"\s+",
         " ",
@@ -114,21 +110,6 @@ def normalize_header(value):
 
 # ============================================================
 # BILL / INVOICE HEADER DETECTION
-#
-# Supports:
-#
-# BILL
-# BILL NO
-# BILL NUMBER
-# BIL NO
-# INVOICE
-# INVOICE NO
-# INVOICE NUMBER
-# INOVICE NO       <-- typo
-# INOVICE NUMBER   <-- typo
-# INV
-# INV NO
-# INV NUMBER
 # ============================================================
 
 def is_bill_invoice_header(value):
@@ -138,7 +119,6 @@ def is_bill_invoice_header(value):
     if not header:
         return False
 
-    # Exact supported names
     exact_names = {
 
         # BILL
@@ -158,7 +138,7 @@ def is_bill_invoice_header(value):
         "invoice number",
         "invoice num",
 
-        # Common Excel typo
+        # COMMON TYPO
         "inovice",
         "inovice no",
         "inovice number",
@@ -170,7 +150,7 @@ def is_bill_invoice_header(value):
         "inv number",
         "inv num",
 
-        # Reference formats
+        # REFERENCE
         "bill ref",
         "bill ref no",
         "bill ref number",
@@ -205,13 +185,6 @@ def is_bill_invoice_header(value):
         "num"
     }
 
-    # Example:
-    #
-    # BILL NO
-    # INVOICE NO
-    # INOVICE NO
-    # INV NUMBER
-    #
     if (
         words.intersection(bill_words)
         and
@@ -249,16 +222,12 @@ def find_bill_invoice_headers(rows):
 
 
 # ============================================================
-# DETERMINE TABLE BOUNDARIES
+# FIND TABLE WIDTH
 #
-# This handles tables like:
+# IMPORTANT:
 #
-# S NO | ITEM | PURCHASE DATE | INVOICE NO | SHOP ID ...
-#
-# and:
-#
-# S NO | ITEM | PURCHASE DATE | INVOICE | SHOP ID ...
-#
+# Do NOT stop simply because another table has a header.
+# We determine the horizontal area of THIS table.
 # ============================================================
 
 def find_table_boundaries(
@@ -278,45 +247,96 @@ def find_table_boundaries(
         rows[header_row]
     )
 
-    column_count = len(header)
+    total_columns = len(header)
 
     # --------------------------------------------------------
-    # Find first meaningful header to LEFT
+    # Start from invoice column and move LEFT.
+    #
+    # We allow blank headers if the surrounding table contains
+    # actual data in that column.
     # --------------------------------------------------------
 
     start = invoice_column
 
-    left = invoice_column - 1
+    # Look up to a few rows around the table.
+    # This helps with blank Excel headers.
+    sample_end = min(
+        len(rows),
+        header_row + 8
+    )
 
-    while left >= 0:
+    for col in range(
+        invoice_column - 1,
+        -1,
+        -1
+    ):
 
-        if is_blank(header[left]):
+        header_value = (
+            header[col]
+            if col < len(header)
+            else None
+        )
+
+        has_data = any(
+            not is_blank(rows[r][col])
+            if col < len(rows[r])
+            else False
+            for r in range(
+                header_row + 1,
+                sample_end
+            )
+        )
+
+        if (
+            not is_blank(header_value)
+            or has_data
+        ):
+
+            start = col
+
+        else:
+
+            # Blank separator column
             break
 
-        start = left
-
-        left -= 1
-
     # --------------------------------------------------------
-    # Find first meaningful header to RIGHT
+    # Move RIGHT.
     # --------------------------------------------------------
 
     end = invoice_column
 
-    right = invoice_column + 1
+    for col in range(
+        invoice_column + 1,
+        total_columns
+    ):
 
-    while right < column_count:
+        header_value = (
+            header[col]
+            if col < len(header)
+            else None
+        )
 
-        if is_blank(header[right]):
+        has_data = any(
+            not is_blank(rows[r][col])
+            if col < len(rows[r])
+            else False
+            for r in range(
+                header_row + 1,
+                sample_end
+            )
+        )
+
+        if (
+            not is_blank(header_value)
+            or has_data
+        ):
+
+            end = col
+
+        else:
+
+            # Blank separator column
             break
-
-        end = right
-
-        right += 1
-
-    # --------------------------------------------------------
-    # Return Python slice
-    # --------------------------------------------------------
 
     return (
         start,
@@ -325,66 +345,100 @@ def find_table_boundaries(
 
 
 # ============================================================
-# FIND END OF THIS TABLE
+# IMPORTANT TABLE OVERLAP CHECK
 #
-# A table ends when:
+# This is the main fix for your screenshot.
 #
-# 1. Another header row for the SAME invoice column appears
-# 2. A new table with a different invoice column/header appears
-#    after sufficient separation
+# A header from a table on the RIGHT must NOT stop a table
+# on the LEFT.
+# ============================================================
+
+def horizontal_overlap(
+    table_start,
+    table_end,
+    header_column
+):
+
+    return (
+        table_start
+        <=
+        header_column
+        <
+        table_end
+    )
+
+
+# ============================================================
+# FIND TABLE END
 #
-# We do NOT stop simply because there is one blank row.
+# ONLY a later header that belongs horizontally inside the
+# CURRENT table can terminate the current table.
+#
+# This prevents:
+#
+# LEFT TABLE       RIGHT TABLE
+# A:H              J:...
+#
+# from interfering with each other.
 # ============================================================
 
 def find_table_end(
     rows,
     header_row,
+    table_start,
+    table_end,
     invoice_column,
     all_headers
 ):
 
     total_rows = len(rows)
 
-    possible_next_headers = []
+    later_headers = sorted(
+        [
+            h
+            for h in all_headers
+            if h["row"] > header_row
+        ],
+        key=lambda x: x["row"]
+    )
 
-    for header in all_headers:
+    for next_header in later_headers:
 
-        if header["row"] <= header_row:
+        next_row = next_header["row"]
+        next_column = next_header["column"]
+
+        # ----------------------------------------------------
+        # MAIN FIX:
+        #
+        # Ignore headers belonging to a different horizontal
+        # table.
+        # ----------------------------------------------------
+
+        if not horizontal_overlap(
+            table_start,
+            table_end,
+            next_column
+        ):
             continue
 
-        possible_next_headers.append(
-            header
-        )
+        # ----------------------------------------------------
+        # Make sure it is not simply some text that happens
+        # to look like a header.
+        # ----------------------------------------------------
+
+        # We have a genuine Bill / Invoice header inside the
+        # same horizontal table area.
+        return next_row
 
     # --------------------------------------------------------
-    # Look for the next invoice/bill header.
-    #
-    # This is the safest boundary because your workbook has
-    # multiple tables vertically.
+    # No next table found.
     # --------------------------------------------------------
-
-    for header in sorted(
-        possible_next_headers,
-        key=lambda x: x["row"]
-    ):
-
-        # If another invoice/bill header occurs later,
-        # it represents another table.
-        #
-        # This is especially important for sheets such as:
-        #
-        # rows 54-80  -> SMS/0504/2021-22
-        # rows 84-89  -> SMS/0976/2021-22
-        #
-        if header["row"] > header_row:
-
-            return header["row"]
 
     return total_rows
 
 
 # ============================================================
-# BUILD ONE TABLE
+# BUILD TABLE
 # ============================================================
 
 def build_table(
@@ -408,35 +462,43 @@ def build_table(
     ]
 
     # --------------------------------------------------------
-    # Horizontal range
+    # Find horizontal table area
     # --------------------------------------------------------
 
-    start_column, end_column = find_table_boundaries(
+    (
+        start_column,
+        end_column
+    ) = find_table_boundaries(
         rows,
         header_row,
         invoice_column
     )
 
     # --------------------------------------------------------
-    # Vertical range
+    # Find vertical table end.
+    #
+    # IMPORTANT:
+    # Uses horizontal overlap.
     # --------------------------------------------------------
 
     end_row = find_table_end(
         rows,
         header_row,
+        start_column,
+        end_column,
         invoice_column,
         all_headers
     )
 
     # --------------------------------------------------------
-    # Get EXACT Excel header names
+    # Header row
     # --------------------------------------------------------
 
-    source_header_row = list(
+    source_header = list(
         rows[header_row]
     )
 
-    headers = source_header_row[
+    headers = source_header[
         start_column:end_column
     ]
 
@@ -447,12 +509,10 @@ def build_table(
 
     while len(headers) < expected_width:
 
-        headers.append(
-            None
-        )
+        headers.append(None)
 
     # --------------------------------------------------------
-    # Invoice column inside this table
+    # Invoice column relative to table
     # --------------------------------------------------------
 
     relative_invoice_column = (
@@ -460,14 +520,22 @@ def build_table(
         start_column
     )
 
+    if (
+        relative_invoice_column < 0
+        or
+        relative_invoice_column >= expected_width
+    ):
+
+        return None
+
     # --------------------------------------------------------
-    # SEARCH INDEX
+    # Search index
     # --------------------------------------------------------
 
     search_index = defaultdict(list)
 
     # --------------------------------------------------------
-    # READ ALL ROWS BELONGING TO THIS TABLE
+    # READ EVERY ROW IN TABLE
     # --------------------------------------------------------
 
     for row_number in range(
@@ -479,7 +547,7 @@ def build_table(
             rows[row_number]
         )
 
-        # Make sure row has enough columns
+        # Make row wide enough
         if len(source_row) < end_column:
 
             source_row.extend(
@@ -490,26 +558,9 @@ def build_table(
                 )
             )
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # ONLY THIS TABLE'S COLUMNS
-        # ----------------------------------------------------
-
         table_row = source_row[
             start_column:end_column
         ]
-
-        # ----------------------------------------------------
-        # Safety
-        # ----------------------------------------------------
-
-        if (
-            relative_invoice_column < 0
-            or
-            relative_invoice_column >= len(table_row)
-        ):
-            continue
 
         # ----------------------------------------------------
         # Invoice value
@@ -527,7 +578,7 @@ def build_table(
             continue
 
         # ----------------------------------------------------
-        # Store complete table row
+        # Store COMPLETE row
         # ----------------------------------------------------
 
         search_index[
@@ -542,7 +593,7 @@ def build_table(
         })
 
     # --------------------------------------------------------
-    # Return
+    # Return table
     # --------------------------------------------------------
 
     return {
@@ -608,7 +659,7 @@ def read_excel_file(
         )
 
         # ----------------------------------------------------
-        # Every sheet
+        # Every worksheet
         # ----------------------------------------------------
 
         for worksheet in workbook.worksheets:
@@ -616,7 +667,7 @@ def read_excel_file(
             rows = []
 
             # ------------------------------------------------
-            # Read complete sheet
+            # Read COMPLETE sheet
             # ------------------------------------------------
 
             for row in worksheet.iter_rows(
@@ -631,7 +682,7 @@ def read_excel_file(
                 continue
 
             # ------------------------------------------------
-            # Detect every Bill / Invoice header
+            # Find all Bill / Invoice headers
             # ------------------------------------------------
 
             headers = find_bill_invoice_headers(
@@ -642,7 +693,7 @@ def read_excel_file(
                 continue
 
             # ------------------------------------------------
-            # Every header = separate table
+            # Build every table
             # ------------------------------------------------
 
             for header_info in headers:
@@ -655,7 +706,7 @@ def read_excel_file(
                     headers
                 )
 
-                if table:
+                if table is not None:
 
                     result[
                         "tables"
@@ -675,7 +726,7 @@ def read_excel_file(
 
 
 # ============================================================
-# BUILD SEARCH INDEX
+# CACHE EXCEL INDEX
 # ============================================================
 
 @st.cache_data(
@@ -835,13 +886,13 @@ def safe_html(value):
 # ============================================================
 # DISPLAY TABLE
 #
-# We intentionally DO NOT use st.dataframe()
-# because Excel files can contain:
+# We DO NOT use st.dataframe().
 #
-# - duplicate headers
-# - blank headers
+# Reason:
+# Excel may contain duplicate / blank headers.
+# PyArrow can reject duplicate column names.
 #
-# which can cause PyArrow errors.
+# HTML table avoids that problem completely.
 # ============================================================
 
 def display_excel_table(
@@ -865,24 +916,12 @@ def display_excel_table(
             len(row)
         )
 
-    # --------------------------------------------------------
-    # Preserve blank Excel headers.
-    #
-    # DO NOT rename them to:
-    #
-    # Column 1
-    # Column 2
-    #
-    # --------------------------------------------------------
-
     while len(headers) < maximum_columns:
 
-        headers.append(
-            None
-        )
+        headers.append(None)
 
     # --------------------------------------------------------
-    # HTML TABLE
+    # HTML
     # --------------------------------------------------------
 
     table_html = """
@@ -1058,7 +1097,7 @@ tr:hover td {
 """
 
     # --------------------------------------------------------
-    # HEADERS
+    # EXACT HEADERS
     # --------------------------------------------------------
 
     for header in headers:
@@ -1079,7 +1118,7 @@ tr:hover td {
 """
 
     # --------------------------------------------------------
-    # ROWS
+    # ALL ROWS
     # --------------------------------------------------------
 
     for row in rows:
@@ -1141,7 +1180,7 @@ tr:hover td {
 
 
 # ============================================================
-# DETECTED HEADER TABLE
+# DETECTED HEADERS
 # ============================================================
 
 def display_detected_headers(
@@ -1200,7 +1239,7 @@ def display_detected_headers(
 
 
 # ============================================================
-# DOWNLOAD EXCEL
+# DOWNLOAD RESULT
 # ============================================================
 
 def create_download_excel(
@@ -1233,12 +1272,10 @@ def create_download_excel(
 
     while len(headers) < maximum_columns:
 
-        headers.append(
-            None
-        )
+        headers.append(None)
 
     # --------------------------------------------------------
-    # Header row
+    # Header
     # --------------------------------------------------------
 
     for column_number, header in enumerate(
@@ -1294,14 +1331,10 @@ def create_download_excel(
                 )
             )
 
-    # --------------------------------------------------------
-    # Freeze header
-    # --------------------------------------------------------
-
     worksheet.freeze_panes = "A2"
 
     # --------------------------------------------------------
-    # Auto width
+    # Column widths
     # --------------------------------------------------------
 
     for column_cells in worksheet.columns:
@@ -1333,10 +1366,6 @@ def create_download_excel(
             ].column_letter
         ].width = width
 
-    # --------------------------------------------------------
-    # Save
-    # --------------------------------------------------------
-
     workbook.save(
         output
     )
@@ -1347,7 +1376,7 @@ def create_download_excel(
 
 
 # ============================================================
-# DOWNLOAD FILE NAME
+# DOWNLOAD NAME
 # ============================================================
 
 def make_download_filename(
@@ -1382,7 +1411,7 @@ def make_download_filename(
 
 
 # ============================================================
-# DISPLAY SEARCH RESULTS
+# DISPLAY RESULTS
 # ============================================================
 
 def display_results(
@@ -1391,7 +1420,7 @@ def display_results(
 ):
 
     # --------------------------------------------------------
-    # Group matches by ACTUAL TABLE
+    # Group by actual table
     # --------------------------------------------------------
 
     grouped = defaultdict(list)
@@ -1422,7 +1451,7 @@ def display_results(
         )
 
     # --------------------------------------------------------
-    # Display each table
+    # Display every table separately
     # --------------------------------------------------------
 
     for group_number, (
@@ -1486,7 +1515,7 @@ def display_results(
         )
 
         # ----------------------------------------------------
-        # EXACT MATCHING ROWS
+        # EXACT ROWS
         # ----------------------------------------------------
 
         rows = [
@@ -1552,12 +1581,14 @@ def display_results(
                         )
                     )
                 )
-            )
+            ),
+
+            use_container_width=False
         )
 
 
 # ============================================================
-# UPLOAD
+# FILE UPLOAD
 # ============================================================
 
 uploaded_files = st.file_uploader(
@@ -1574,7 +1605,7 @@ uploaded_files = st.file_uploader(
 
 
 # ============================================================
-# APPLICATION
+# MAIN APPLICATION
 # ============================================================
 
 if uploaded_files:
@@ -1585,7 +1616,7 @@ if uploaded_files:
     )
 
     # --------------------------------------------------------
-    # Store uploaded files in memory
+    # Read uploaded files into memory
     # --------------------------------------------------------
 
     file_data = tuple(
@@ -1599,7 +1630,7 @@ if uploaded_files:
     )
 
     # --------------------------------------------------------
-    # Build index
+    # Read / index
     # --------------------------------------------------------
 
     with st.spinner(
@@ -1625,7 +1656,7 @@ if uploaded_files:
             )
 
     # --------------------------------------------------------
-    # Table count
+    # Count tables
     # --------------------------------------------------------
 
     total_tables = sum(
@@ -1659,7 +1690,7 @@ if uploaded_files:
         )
 
     # ========================================================
-    # SEARCH AREA
+    # SEARCH
     # ========================================================
 
     st.markdown(
@@ -1672,7 +1703,7 @@ if uploaded_files:
 
         placeholder=(
             "Example: 74, 162, "
-            "CRSCL/19-20/1086, "
+            "321, CRSCL/19-20/1086, "
             "SMS/0504/2021-22"
         ),
 
@@ -1689,7 +1720,7 @@ if uploaded_files:
     )
 
     # ========================================================
-    # SEARCH
+    # PERFORM SEARCH
     # ========================================================
 
     if search_button:
@@ -1748,8 +1779,9 @@ if uploaded_files:
                 )
 
                 st.caption(
-                    "Search is performed only in "
-                    "detected Bill / Invoice columns."
+                    "Only detected Bill / Invoice "
+                    "columns were searched. "
+                    "Matching is exact."
                 )
 
 else:
