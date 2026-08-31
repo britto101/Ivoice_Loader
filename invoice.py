@@ -1,8 +1,8 @@
 import streamlit as st
 import io
 import re
-import unicodedata
 import html
+import unicodedata
 
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,7 +12,7 @@ from openpyxl import load_workbook, Workbook
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
@@ -29,21 +29,8 @@ st.set_page_config(
 st.title("🔎 Bill / Invoice Search")
 
 st.caption(
-    "Search exact Bill / Invoice numbers across uploaded Excel files."
+    "Search exact Bill / Invoice numbers across all uploaded Excel files."
 )
-
-
-# ============================================================
-# SETTINGS
-# ============================================================
-
-# Maximum number of rows allowed between a header row and
-# another possible header row.
-HEADER_LOOKBACK = 10
-
-# Maximum number of completely blank rows used to identify
-# the end of a table section.
-MAX_EMPTY_ROWS = 2
 
 
 # ============================================================
@@ -56,38 +43,46 @@ def is_blank(value):
         return True
 
     try:
-
         if value != value:
             return True
-
     except Exception:
         pass
 
     return str(value).strip() == ""
 
 
-def normalize_search_value(value):
+def normalize_value(value):
+
+    """
+    Converts Excel values into a reliable search string.
+
+    Examples:
+
+        Excel number 74       -> "74"
+        Excel 74.0            -> "74"
+        Excel "74"            -> "74"
+        Excel " 74 "          -> "74"
+
+    Original Excel value is NEVER modified for display.
+    """
 
     if is_blank(value):
         return ""
 
+    # Integer
+    if isinstance(value, int):
+        return str(value)
+
+    # Float
     if isinstance(value, float):
 
         if value.is_integer():
             return str(int(value))
 
-    if isinstance(value, int):
-        return str(value)
+        return str(value).strip()
 
+    # String
     return str(value).strip()
-
-
-def display_value(value):
-
-    if is_blank(value):
-        return ""
-
-    return str(value)
 
 
 # ============================================================
@@ -106,21 +101,18 @@ def normalize_header(value):
 
     text = text.strip().lower()
 
-    # Convert separators to spaces
     text = re.sub(
         r"[_\-/\\.:]+",
         " ",
         text
     )
 
-    # Remove punctuation
     text = re.sub(
         r"[^\w\s]",
         " ",
         text
     )
 
-    # Multiple spaces
     text = re.sub(
         r"\s+",
         " ",
@@ -141,7 +133,7 @@ def is_bill_invoice_header(value):
     if not header:
         return False
 
-    exact_headers = {
+    exact_names = {
 
         "bill no",
         "bill number",
@@ -175,7 +167,7 @@ def is_bill_invoice_header(value):
         "inv ref number"
     }
 
-    if header in exact_headers:
+    if header in exact_names:
         return True
 
     words = set(
@@ -195,22 +187,20 @@ def is_bill_invoice_header(value):
         "num"
     }
 
-    if (
+    return bool(
         words.intersection(bill_words)
-        and words.intersection(number_words)
-    ):
-        return True
-
-    return False
+        and
+        words.intersection(number_words)
+    )
 
 
 # ============================================================
-# FIND BILL / INVOICE HEADERS
+# FIND ALL BILL / INVOICE HEADERS
 # ============================================================
 
 def find_bill_headers(rows):
 
-    found = []
+    headers = []
 
     for row_index, row in enumerate(rows):
 
@@ -218,7 +208,7 @@ def find_bill_headers(rows):
 
             if is_bill_invoice_header(value):
 
-                found.append({
+                headers.append({
 
                     "row":
                         row_index,
@@ -230,175 +220,158 @@ def find_bill_headers(rows):
                         value
                 })
 
-    return found
+    return headers
 
 
 # ============================================================
-# FIND TABLE COLUMN RANGE
+# FIND TABLE WIDTH
 #
-# THIS IS THE IMPORTANT FIX.
+# IMPORTANT:
 #
-# Your worksheet contains multiple tables SIDE-BY-SIDE.
+# Your Excel file can contain multiple tables side-by-side.
 #
 # Example:
 #
-# LEFT TABLE:
-# S NO | ITEM | INVOICE NO | SHOP ID | ...
+# A:H  -> first table
+# I    -> blank separator
+# J:P  -> second table
 #
-# RIGHT TABLE:
-# S NO | ITEM | INVOICE NO | SHOP ID | ...
-#
-# We must return ONLY the table containing the searched
-# Bill / Invoice header.
-#
-# We therefore determine the table's horizontal boundaries
-# from the header row.
+# We determine the table from the header row.
 # ============================================================
 
-def find_table_column_range(
+def find_table_range(
     rows,
     header_row,
     bill_column
 ):
 
     if header_row >= len(rows):
-        return bill_column, bill_column + 1
 
-    row = rows[
-        header_row
-    ]
+        return (
+            bill_column,
+            bill_column + 1
+        )
 
-    total_columns = len(row)
-
-    # --------------------------------------------------------
-    # Find contiguous header block around Bill/Invoice column
-    # --------------------------------------------------------
-
-    start_column = bill_column
-    end_column = bill_column
-
-    # --------------------------------------------------------
-    # Search LEFT
-    #
-    # Continue while header cells exist.
-    # --------------------------------------------------------
-
-    column = bill_column - 1
-
-    while column >= 0:
-
-        value = row[column]
-
-        if is_blank(value):
-            break
-
-        start_column = column
-
-        column -= 1
-
-    # --------------------------------------------------------
-    # Search RIGHT
-    # --------------------------------------------------------
-
-    column = bill_column + 1
-
-    while column < total_columns:
-
-        value = row[column]
-
-        if is_blank(value):
-            break
-
-        end_column = column
-
-        column += 1
-
-    # --------------------------------------------------------
-    # If only Bill/Invoice itself was detected, try to find
-    # surrounding columns using nearby rows.
-    #
-    # This helps with some irregular Excel sheets.
-    # --------------------------------------------------------
-
-    if start_column == bill_column and end_column == bill_column:
-
-        # Look a few rows above for a possible header layout
-        for previous_row in range(
-            max(
-                0,
-                header_row - HEADER_LOOKBACK
-            ),
+    header = list(
+        rows[
             header_row
+        ]
+    )
+
+    total_columns = len(
+        header
+    )
+
+    # --------------------------------------------------------
+    # LEFT BOUNDARY
+    # --------------------------------------------------------
+
+    start = bill_column
+
+    col = bill_column - 1
+
+    while col >= 0:
+
+        if is_blank(
+            header[col]
         ):
+            break
 
-            candidate = rows[
-                previous_row
-            ]
+        start = col
 
-            if bill_column >= len(candidate):
-                continue
+        col -= 1
 
-            # Only use it if the Bill/Invoice position is
-            # also occupied or nearby.
-            left = bill_column
+    # --------------------------------------------------------
+    # RIGHT BOUNDARY
+    # --------------------------------------------------------
 
-            while left > 0:
+    end = bill_column
 
-                if is_blank(
-                    candidate[left - 1]
-                ):
-                    break
+    col = bill_column + 1
 
-                left -= 1
+    while col < total_columns:
 
-            right = bill_column
+        if is_blank(
+            header[col]
+        ):
+            break
 
-            while right + 1 < len(candidate):
+        end = col
 
-                if is_blank(
-                    candidate[right + 1]
-                ):
-                    break
+        col += 1
 
-                right += 1
+    # --------------------------------------------------------
+    # Include blank columns INSIDE the detected table.
+    #
+    # Example:
+    #
+    # S NO | ITEM | INVOICE NO | SHOP ID | [blank] | GST
+    #
+    # If there are headers on both sides, preserve the blank.
+    # --------------------------------------------------------
 
-            if (
-                left != bill_column
-                or right != bill_column
-            ):
+    # Search left for first nonblank header
+    left_nonblank = bill_column
 
-                start_column = left
-                end_column = right
+    while left_nonblank >= 0:
 
-                break
+        if not is_blank(
+            header[left_nonblank]
+        ):
+            break
+
+        left_nonblank -= 1
+
+    # Search right for first nonblank header
+    right_nonblank = bill_column
+
+    while right_nonblank < total_columns:
+
+        if not is_blank(
+            header[right_nonblank]
+        ):
+            break
+
+        right_nonblank += 1
+
+    if (
+        left_nonblank >= 0
+        and
+        right_nonblank < total_columns
+    ):
+
+        start = left_nonblank
+        end = right_nonblank
+
+    # --------------------------------------------------------
+    # Return Python slice:
+    #
+    # start inclusive
+    # end exclusive
+    # --------------------------------------------------------
 
     return (
-        start_column,
-        end_column + 1
+        start,
+        end + 1
     )
 
 
 # ============================================================
-# FIND TABLE END
-#
-# IMPORTANT:
-#
-# We search until another Bill/Invoice header appears IN THE
-# SAME TABLE COLUMN.
-#
-# We do not treat every blank row in the worksheet as the end.
+# FIND NEXT SAME INVOICE HEADER
 # ============================================================
 
-def find_table_end(
+def find_section_end(
     rows,
     header_row,
     bill_column,
     all_headers
 ):
 
-    total_rows = len(rows)
+    end_row = len(
+        rows
+    )
 
-    end_row = total_rows
+    future_headers = []
 
     for header in all_headers:
 
@@ -408,52 +381,21 @@ def find_table_end(
         if header["row"] <= header_row:
             continue
 
-        end_row = header[
-            "row"
-        ]
+        future_headers.append(
+            header["row"]
+        )
 
-        break
+    if future_headers:
+
+        end_row = min(
+            future_headers
+        )
 
     return end_row
 
 
 # ============================================================
-# REMOVE COMPLETELY EMPTY TRAILING COLUMNS
-#
-# We keep the table's actual header columns.
-#
-# We do NOT use the entire worksheet.
-# ============================================================
-
-def trim_table_columns(
-    rows,
-    header_row,
-    start_column,
-    end_column,
-    end_row
-):
-
-    if end_column <= start_column:
-        return start_column, end_column
-
-    # --------------------------------------------------------
-    # Header itself defines the initial range.
-    # --------------------------------------------------------
-
-    actual_start = start_column
-    actual_end = end_column
-
-    # --------------------------------------------------------
-    # Do not shrink columns that have actual header names.
-    #
-    # This preserves the Excel table structure.
-    # --------------------------------------------------------
-
-    return actual_start, actual_end
-
-
-# ============================================================
-# BUILD ONE TABLE INDEX
+# BUILD TABLE INDEX
 # ============================================================
 
 def build_table_index(
@@ -480,17 +422,17 @@ def build_table_index(
     # Find horizontal table range
     # --------------------------------------------------------
 
-    start_column, end_column = find_table_column_range(
+    start_column, end_column = find_table_range(
         rows,
         header_row,
         bill_column
     )
 
     # --------------------------------------------------------
-    # Find vertical end
+    # Find vertical section end
     # --------------------------------------------------------
 
-    end_row = find_table_end(
+    end_row = find_section_end(
         rows,
         header_row,
         bill_column,
@@ -498,124 +440,129 @@ def build_table_index(
     )
 
     # --------------------------------------------------------
-    # Headers ONLY from this table
+    # Actual Excel header row
     # --------------------------------------------------------
 
-    headers = list(
+    header_row_values = list(
         rows[
             header_row
-        ][
-            start_column:end_column
         ]
     )
 
-    # --------------------------------------------------------
-    # Ensure header width
-    # --------------------------------------------------------
+    headers = header_row_values[
+        start_column:end_column
+    ]
 
     table_width = (
         end_column -
         start_column
     )
 
-    if len(headers) < table_width:
+    while len(headers) < table_width:
 
-        headers.extend(
-            [None] *
-            (
-                table_width -
-                len(headers)
-            )
+        headers.append(
+            None
         )
 
     # --------------------------------------------------------
-    # Search index
+    # Relative Bill/Invoice column
     # --------------------------------------------------------
 
-    search_map = defaultdict(list)
+    relative_bill_column = (
+        bill_column -
+        start_column
+    )
 
     # --------------------------------------------------------
-    # Search all rows belonging to this section
+    # SEARCH INDEX
     # --------------------------------------------------------
 
-    for row_number in range(
+    search_index = defaultdict(list)
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # Search EVERY ROW in this section.
+    #
+    # Blank rows are NOT used to stop searching.
+    # --------------------------------------------------------
+
+    for row_index in range(
         header_row + 1,
         end_row
     ):
 
-        original_row = list(
+        worksheet_row = list(
             rows[
-                row_number
+                row_index
             ]
         )
 
         # ----------------------------------------------------
-        # Ensure enough columns
+        # Make row long enough
         # ----------------------------------------------------
 
-        if len(original_row) < end_column:
+        if len(worksheet_row) < end_column:
 
-            original_row.extend(
+            worksheet_row.extend(
                 [None] *
                 (
                     end_column -
-                    len(original_row)
+                    len(worksheet_row)
                 )
             )
 
         # ----------------------------------------------------
-        # ONLY THIS TABLE'S COLUMNS
+        # Take ONLY this table
         # ----------------------------------------------------
 
-        table_row = original_row[
+        table_row = worksheet_row[
             start_column:end_column
         ]
 
         # ----------------------------------------------------
-        # Bill/Invoice position relative to table
+        # Safety
         # ----------------------------------------------------
-
-        relative_bill_column = (
-            bill_column -
-            start_column
-        )
 
         if (
             relative_bill_column < 0
-            or relative_bill_column >= len(table_row)
+            or
+            relative_bill_column >= len(table_row)
         ):
             continue
 
-        bill_value = table_row[
+        # ----------------------------------------------------
+        # BILL / INVOICE VALUE
+        # ----------------------------------------------------
+
+        invoice_value = table_row[
             relative_bill_column
         ]
 
-        search_value = normalize_search_value(
-            bill_value
+        normalized = normalize_value(
+            invoice_value
         )
 
-        if not search_value:
+        if normalized == "":
             continue
 
         # ----------------------------------------------------
-        # Store COMPLETE TABLE ROW
-        #
-        # NOT the entire worksheet row.
+        # INDEX IT
         # ----------------------------------------------------
 
-        search_map[
-            search_value
+        search_index[
+            normalized
         ].append({
 
             "excel_row":
-                row_number + 1,
+                row_index + 1,
 
             "row":
                 table_row
         })
 
     # --------------------------------------------------------
-    # Return table index
+    # Return
     # --------------------------------------------------------
 
     return {
@@ -644,8 +591,8 @@ def build_table_index(
         "headers":
             headers,
 
-        "search_map":
-            dict(search_map)
+        "search_index":
+            dict(search_index)
     }
 
 
@@ -681,7 +628,7 @@ def read_excel_file(
         )
 
         # ----------------------------------------------------
-        # Every worksheet
+        # Process every worksheet
         # ----------------------------------------------------
 
         for worksheet in workbook.worksheets:
@@ -707,52 +654,46 @@ def read_excel_file(
             # Detect Bill / Invoice headers
             # ------------------------------------------------
 
-            bill_headers = find_bill_headers(
+            detected_headers = find_bill_headers(
                 rows
             )
 
-            if not bill_headers:
+            if not detected_headers:
                 continue
 
             # ------------------------------------------------
-            # IMPORTANT:
-            #
-            # Each detected header creates its own table.
-            #
-            # Tables can exist side-by-side.
+            # Build separate table for every header
             # ------------------------------------------------
 
-            for header_info in bill_headers:
+            for header_info in detected_headers:
 
                 table = build_table_index(
                     rows,
                     filename,
                     worksheet.title,
                     header_info,
-                    bill_headers
+                    detected_headers
                 )
 
-                if table:
-
-                    result[
-                        "tables"
-                    ].append(
-                        table
-                    )
+                result[
+                    "tables"
+                ].append(
+                    table
+                )
 
         workbook.close()
 
-    except Exception as e:
+    except Exception as error:
 
         result["error"] = str(
-            e
+            error
         )
 
     return result
 
 
 # ============================================================
-# BUILD SEARCH INDEX
+# BUILD COMPLETE INDEX
 # ============================================================
 
 @st.cache_data(
@@ -765,7 +706,7 @@ def build_search_index(
 
     results = []
 
-    workers = min(
+    worker_count = min(
         4,
         max(
             1,
@@ -774,7 +715,7 @@ def build_search_index(
     )
 
     with ThreadPoolExecutor(
-        max_workers=workers
+        max_workers=worker_count
     ) as executor:
 
         futures = {}
@@ -799,9 +740,13 @@ def build_search_index(
                 future.result()
             )
 
+    # --------------------------------------------------------
+    # Keep alphabetical file order
+    # --------------------------------------------------------
+
     results.sort(
-        key=lambda item:
-            item["filename"].lower()
+        key=lambda x:
+            x["filename"].lower()
     )
 
     return results
@@ -816,13 +761,17 @@ def search_excel(
     search_value
 ):
 
-    search_value = normalize_search_value(
+    search_value = normalize_value(
         search_value
     )
 
     results = []
 
     seen = set()
+
+    # --------------------------------------------------------
+    # Search every indexed table
+    # --------------------------------------------------------
 
     for file_data in indexed_files:
 
@@ -831,7 +780,7 @@ def search_excel(
         ]:
 
             matches = table[
-                "search_map"
+                "search_index"
             ].get(
                 search_value,
                 []
@@ -844,10 +793,15 @@ def search_excel(
                 ]
 
                 unique_key = (
+
                     table["filename"],
+
                     table["sheet"],
+
                     table["header_row"],
+
                     table["bill_column"],
+
                     excel_row
                 )
 
@@ -875,6 +829,12 @@ def search_excel(
                     "bill_column":
                         table["bill_column"],
 
+                    "start_column":
+                        table["start_column"],
+
+                    "end_column":
+                        table["end_column"],
+
                     "excel_row":
                         excel_row,
 
@@ -889,33 +849,38 @@ def search_excel(
 
 
 # ============================================================
-# HTML VALUE
+# HTML ESCAPE
 # ============================================================
 
-def html_value(value):
+def safe_html(value):
+
+    if is_blank(value):
+        return ""
 
     return html.escape(
-        display_value(value)
+        str(value)
     )
 
 
 # ============================================================
-# DISPLAY HTML TABLE
+# DISPLAY TABLE
+#
+# We deliberately do NOT use st.dataframe().
+#
+# Reason:
+#
+# Duplicate / blank Excel headers can cause pyarrow errors.
 # ============================================================
 
 def display_excel_table(
     headers,
     rows,
-    max_height=650
+    height=650
 ):
 
     headers = list(
         headers
     )
-
-    # --------------------------------------------------------
-    # Determine width
-    # --------------------------------------------------------
 
     maximum_columns = len(
         headers
@@ -929,7 +894,7 @@ def display_excel_table(
         )
 
     # --------------------------------------------------------
-    # Complete header width
+    # Complete header list
     # --------------------------------------------------------
 
     while len(headers) < maximum_columns:
@@ -939,10 +904,10 @@ def display_excel_table(
         )
 
     # --------------------------------------------------------
-    # Build HTML
+    # HTML
     # --------------------------------------------------------
 
-    table_html = """
+    content = """
 <!DOCTYPE html>
 
 <html>
@@ -952,10 +917,6 @@ def display_excel_table(
 <meta charset="UTF-8">
 
 <style>
-
-* {
-    box-sizing: border-box;
-}
 
 html,
 body {
@@ -972,7 +933,7 @@ body {
         sans-serif;
 }
 
-.table-wrapper {
+.wrapper {
 
     width: 100%;
 
@@ -1007,7 +968,7 @@ table {
         14px;
 }
 
-thead th {
+th {
 
     position:
         sticky;
@@ -1016,19 +977,19 @@ thead th {
         0;
 
     z-index:
-        20;
+        50;
 
     background:
         #1f2129;
 
     color:
-        #d8dbe2;
-
-    padding:
-        11px 14px;
+        #e5e7eb;
 
     border:
         1px solid #3a3d47;
+
+    padding:
+        11px 14px;
 
     text-align:
         left;
@@ -1040,22 +1001,22 @@ thead th {
         600;
 
     min-width:
-        60px;
+        65px;
 }
 
-tbody td {
+td {
 
     background:
         #0e1117;
 
     color:
-        #f1f1f1;
-
-    padding:
-        10px 14px;
+        #f5f5f5;
 
     border:
         1px solid #30333d;
+
+    padding:
+        10px 14px;
 
     text-align:
         left;
@@ -1064,10 +1025,10 @@ tbody td {
         nowrap;
 
     min-width:
-        60px;
+        65px;
 }
 
-tbody tr:hover td {
+tr:hover td {
 
     background:
         #181b23;
@@ -1109,7 +1070,7 @@ tbody tr:hover td {
 
 <body>
 
-<div class="table-wrapper">
+<div class="wrapper">
 
 <table>
 
@@ -1118,19 +1079,20 @@ tbody tr:hover td {
 <tr>
 """
 
-    # ========================================================
+    # --------------------------------------------------------
     # HEADERS
-    # ========================================================
+    # --------------------------------------------------------
 
     for header in headers:
 
-        table_html += (
+        content += (
             "<th>"
-            + html_value(header)
+            + safe_html(header)
             + "</th>"
         )
 
-    table_html += """
+    content += """
+
 </tr>
 
 </thead>
@@ -1138,9 +1100,9 @@ tbody tr:hover td {
 <tbody>
 """
 
-    # ========================================================
-    # ROWS
-    # ========================================================
+    # --------------------------------------------------------
+    # DATA
+    # --------------------------------------------------------
 
     for row in rows:
 
@@ -1158,21 +1120,22 @@ tbody tr:hover td {
                 )
             )
 
-        table_html += "<tr>"
+        content += "<tr>"
 
         for value in row[
             :maximum_columns
         ]:
 
-            table_html += (
+            content += (
                 "<td>"
-                + html_value(value)
+                + safe_html(value)
                 + "</td>"
             )
 
-        table_html += "</tr>"
+        content += "</tr>"
 
-    table_html += """
+    content += """
+
 </tbody>
 
 </table>
@@ -1185,29 +1148,25 @@ tbody tr:hover td {
 """
 
     calculated_height = min(
-        max_height,
-        100 + (
-            len(rows) * 45
+        height,
+        max(
+            220,
+            100 + len(rows) * 43
         )
     )
 
-    calculated_height = max(
-        180,
-        calculated_height
-    )
-
     components.html(
-        table_html,
+        content,
         height=calculated_height,
         scrolling=False
     )
 
 
 # ============================================================
-# DETECTED HEADER DISPLAY
+# DETECTED HEADER TABLE
 # ============================================================
 
-def show_detected_headers(
+def display_detected_headers(
     indexed_files
 ):
 
@@ -1217,8 +1176,8 @@ def show_detected_headers(
         "Header",
         "Excel Header Row",
         "Bill / Invoice Column",
-        "Table Start Column",
-        "Table End Column"
+        "Table Start",
+        "Table End"
     ]
 
     rows = []
@@ -1251,7 +1210,7 @@ def show_detected_headers(
         display_excel_table(
             headers,
             rows,
-            max_height=450
+            height=450
         )
 
 
@@ -1276,10 +1235,6 @@ def create_download_excel(
         headers
     )
 
-    # --------------------------------------------------------
-    # Determine width
-    # --------------------------------------------------------
-
     maximum_columns = len(
         headers
     )
@@ -1291,10 +1246,6 @@ def create_download_excel(
             len(row)
         )
 
-    # --------------------------------------------------------
-    # Complete headers
-    # --------------------------------------------------------
-
     while len(headers) < maximum_columns:
 
         headers.append(
@@ -1302,7 +1253,7 @@ def create_download_excel(
         )
 
     # --------------------------------------------------------
-    # Write headers
+    # Headers
     # --------------------------------------------------------
 
     for column_number, header in enumerate(
@@ -1321,7 +1272,7 @@ def create_download_excel(
         )
 
     # --------------------------------------------------------
-    # Write rows
+    # Data
     # --------------------------------------------------------
 
     for row_number, row in enumerate(
@@ -1344,7 +1295,9 @@ def create_download_excel(
             )
 
         for column_number, value in enumerate(
-            row[:maximum_columns],
+            row[
+                :maximum_columns
+            ],
             start=1
         ):
 
@@ -1365,7 +1318,7 @@ def create_download_excel(
     worksheet.freeze_panes = "A2"
 
     # --------------------------------------------------------
-    # Column widths
+    # Width
     # --------------------------------------------------------
 
     for column_cells in worksheet.columns:
@@ -1411,25 +1364,25 @@ def create_download_excel(
 
 
 # ============================================================
-# DOWNLOAD FILENAME
+# DOWNLOAD FILE NAME
 # ============================================================
 
-def make_download_filename(
-    filename,
+def download_filename(
+    original_filename,
     search_value
 ):
 
-    base_name = re.sub(
+    base = re.sub(
         r"\.(xlsx|xlsm)$",
         "",
-        filename,
+        original_filename,
         flags=re.IGNORECASE
     )
 
-    base_name = re.sub(
+    base = re.sub(
         r'[\\/:*?"<>|]+',
         "_",
-        base_name
+        base
     )
 
     search_part = re.sub(
@@ -1439,14 +1392,14 @@ def make_download_filename(
     )
 
     return (
-        f"{base_name}_"
+        f"{base}_"
         f"{search_part}_"
         f"Search_Result.xlsx"
     )
 
 
 # ============================================================
-# DISPLAY SEARCH RESULTS
+# DISPLAY RESULTS
 # ============================================================
 
 def display_results(
@@ -1455,7 +1408,7 @@ def display_results(
 ):
 
     # --------------------------------------------------------
-    # Group results by actual table
+    # Group by actual Excel table
     # --------------------------------------------------------
 
     grouped = defaultdict(list)
@@ -1463,11 +1416,20 @@ def display_results(
     for result in results:
 
         key = (
+
             result["filename"],
+
             result["sheet"],
+
             result["header"],
+
             result["header_row"],
-            result["bill_column"]
+
+            result["bill_column"],
+
+            result["start_column"],
+
+            result["end_column"]
         )
 
         grouped[
@@ -1477,10 +1439,10 @@ def display_results(
         )
 
     # --------------------------------------------------------
-    # Display each table
+    # Display groups
     # --------------------------------------------------------
 
-    for group_index, (
+    for group_number, (
         key,
         group
     ) in enumerate(
@@ -1492,7 +1454,9 @@ def display_results(
             sheet_name,
             bill_header,
             header_row,
-            bill_column
+            bill_column,
+            start_column,
+            end_column
         ) = key
 
         st.markdown(
@@ -1500,7 +1464,7 @@ def display_results(
         )
 
         # ----------------------------------------------------
-        # FILE
+        # File
         # ----------------------------------------------------
 
         st.markdown(
@@ -1508,7 +1472,7 @@ def display_results(
         )
 
         # ----------------------------------------------------
-        # SHEET
+        # Sheet
         # ----------------------------------------------------
 
         st.write(
@@ -1516,7 +1480,7 @@ def display_results(
         )
 
         # ----------------------------------------------------
-        # BILL / INVOICE HEADER
+        # Header
         # ----------------------------------------------------
 
         st.write(
@@ -1525,7 +1489,7 @@ def display_results(
         )
 
         # ----------------------------------------------------
-        # HEADER INFO
+        # Location
         # ----------------------------------------------------
 
         st.write(
@@ -1537,30 +1501,31 @@ def display_results(
         )
 
         # ----------------------------------------------------
-        # MATCH COUNT
+        # Table range
         # ----------------------------------------------------
 
         st.caption(
-            f"Showing {len(group)} "
-            f"complete matching Excel row(s)."
+            f"Table columns: "
+            f"{start_column} → {end_column}"
         )
 
         # ----------------------------------------------------
-        # HEADERS FROM THIS TABLE ONLY
+        # Rows
         # ----------------------------------------------------
+
+        rows = [
+            result["row"]
+            for result in group
+        ]
 
         headers = list(
             group[0]["headers"]
         )
 
-        # ----------------------------------------------------
-        # MATCHING ROWS FROM THIS TABLE ONLY
-        # ----------------------------------------------------
-
-        rows = [
-            item["row"]
-            for item in group
-        ]
+        st.caption(
+            f"Showing {len(rows)} "
+            f"complete matching Excel row(s)."
+        )
 
         # ----------------------------------------------------
         # DISPLAY
@@ -1569,56 +1534,55 @@ def display_results(
         display_excel_table(
             headers,
             rows,
-            max_height=650
+            height=650
         )
 
-        # ====================================================
+        # ----------------------------------------------------
         # DOWNLOAD
-        # ====================================================
+        # ----------------------------------------------------
 
         download_data = create_download_excel(
             headers,
             rows
         )
 
-        download_filename = make_download_filename(
+        file_name = download_filename(
             filename,
             search_value
         )
 
-        download_key = (
-            "download_"
-            + str(
-                abs(
-                    hash(
-                        (
-                            filename,
-                            sheet_name,
-                            bill_header,
-                            header_row,
-                            bill_column,
-                            search_value,
-                            group_index
-                        )
-                    )
-                )
-            )
-        )
-
         st.download_button(
 
-            label="⬇️ Download Table",
+            "⬇️ Download Table",
 
             data=download_data,
 
-            file_name=download_filename,
+            file_name=file_name,
 
             mime=(
                 "application/vnd.openxmlformats-officedocument."
                 "spreadsheetml.sheet"
             ),
 
-            key=download_key
+            key=(
+                "download_"
+                + str(
+                    abs(
+                        hash(
+                            (
+                                filename,
+                                sheet_name,
+                                header_row,
+                                bill_column,
+                                start_column,
+                                end_column,
+                                search_value,
+                                group_number
+                            )
+                        )
+                    )
+                )
+            )
         )
 
 
@@ -1640,7 +1604,7 @@ uploaded_files = st.file_uploader(
 
 
 # ============================================================
-# MAIN APPLICATION
+# MAIN
 # ============================================================
 
 if uploaded_files:
@@ -1655,7 +1619,7 @@ if uploaded_files:
     )
 
     # ========================================================
-    # KEEP FILES IN MEMORY
+    # GET FILE BYTES
     # ========================================================
 
     file_data = tuple(
@@ -1669,11 +1633,11 @@ if uploaded_files:
     )
 
     # ========================================================
-    # READ FILES
+    # READ / INDEX
     # ========================================================
 
     with st.spinner(
-        "📖 Reading Excel files and building search index..."
+        "📖 Reading Excel files..."
     ):
 
         indexed_files = build_search_index(
@@ -1684,44 +1648,45 @@ if uploaded_files:
     # ERRORS
     # ========================================================
 
-    for file_result in indexed_files:
+    for file_data_result in indexed_files:
 
-        if file_result["error"]:
+        if file_data_result["error"]:
 
             st.error(
-                f"❌ {file_result['filename']}: "
-                f"{file_result['error']}"
+                f"❌ "
+                f"{file_data_result['filename']}: "
+                f"{file_data_result['error']}"
             )
 
     # ========================================================
-    # TOTAL TABLES
+    # TABLE COUNT
     # ========================================================
 
     total_tables = sum(
 
         len(
-            file_result["tables"]
+            item["tables"]
         )
 
-        for file_result in indexed_files
+        for item in indexed_files
     )
 
-    # ========================================================
-    # DETECTED HEADERS
-    # ========================================================
-
-    if total_tables > 0:
+    if total_tables:
 
         st.success(
             f"✅ {total_tables} "
             f"Bill / Invoice table(s) detected"
         )
 
+        # ----------------------------------------------------
+        # HEADER LIST
+        # ----------------------------------------------------
+
         with st.expander(
             "📋 View detected Bill / Invoice headers"
         ):
 
-            show_detected_headers(
+            display_detected_headers(
                 indexed_files
             )
 
@@ -1743,7 +1708,10 @@ if uploaded_files:
 
         "Bill / Invoice Number",
 
-        placeholder="Example: CRSCL/19-20/1086",
+        placeholder=(
+            "Example: "
+            "74 or CRSCL/19-20/1086"
+        ),
 
         label_visibility="collapsed"
     )
@@ -1758,14 +1726,10 @@ if uploaded_files:
     )
 
     # ========================================================
-    # SEARCH ACTION
+    # SEARCH BUTTON
     # ========================================================
 
     if search_button:
-
-        # ----------------------------------------------------
-        # Empty input
-        # ----------------------------------------------------
 
         if not search_value.strip():
 
@@ -1774,19 +1738,12 @@ if uploaded_files:
                 "Bill / Invoice number."
             )
 
-        # ----------------------------------------------------
-        # No tables
-        # ----------------------------------------------------
-
         elif total_tables == 0:
 
             st.error(
-                "❌ No Bill / Invoice columns found."
+                "❌ No Bill / Invoice "
+                "columns detected."
             )
-
-        # ----------------------------------------------------
-        # SEARCH
-        # ----------------------------------------------------
 
         else:
 
@@ -1828,9 +1785,11 @@ if uploaded_files:
                 )
 
                 st.caption(
-                    "Only detected Bill / Invoice "
-                    "columns were searched. "
-                    "Matching is exact."
+                    "The search checks only detected "
+                    "Bill / Invoice columns. "
+                    "Numbers such as 74 are matched "
+                    "correctly whether Excel stores "
+                    "them as numbers or text."
                 )
 
 else:
