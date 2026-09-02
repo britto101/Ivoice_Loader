@@ -114,21 +114,6 @@ def normalize_header(value):
 
 # ============================================================
 # BILL / INVOICE HEADER DETECTION
-#
-# Supports:
-#
-# BILL
-# BILL NO
-# BILL NUMBER
-# BIL NO
-# INVOICE
-# INVOICE NO
-# INVOICE NUMBER
-# INOVICE NO       <-- typo
-# INOVICE NUMBER   <-- typo
-# INV
-# INV NO
-# INV NUMBER
 # ============================================================
 
 def is_bill_invoice_header(value):
@@ -138,7 +123,6 @@ def is_bill_invoice_header(value):
     if not header:
         return False
 
-    # Exact supported names
     exact_names = {
 
         # BILL
@@ -158,7 +142,7 @@ def is_bill_invoice_header(value):
         "invoice number",
         "invoice num",
 
-        # Common Excel typo
+        # Common typo
         "inovice",
         "inovice no",
         "inovice number",
@@ -205,14 +189,6 @@ def is_bill_invoice_header(value):
         "num"
     }
 
-    # Example:
-    #
-    # BILL NO
-    # INVOICE NO
-    # INOVICE NO
-    # INV NUMBER
-    #
-
     if (
         words.intersection(bill_words)
         and
@@ -247,108 +223,7 @@ def find_bill_invoice_headers(rows):
 
 
 # ============================================================
-# DETERMINE TABLE BOUNDARIES
-#
-# IMPORTANT FIX:
-#
-# Excel tables can have blank columns between headers.
-#
-# Example:
-#
-# S NO | BIL NO |       |       | ITEMS | SHOP ID
-#
-# The blank columns must remain part of the table.
-#
-# ============================================================
-
-def find_table_boundaries(
-    rows,
-    header_row,
-    invoice_column
-):
-
-    if header_row >= len(rows):
-
-        return (
-            invoice_column,
-            invoice_column + 1
-        )
-
-    header = list(
-        rows[header_row]
-    )
-
-    column_count = len(header)
-
-    # --------------------------------------------------------
-    # Find first meaningful header on the LEFT
-    # --------------------------------------------------------
-
-    start = invoice_column
-
-    for column in range(
-        invoice_column - 1,
-        -1,
-        -1
-    ):
-
-        if not is_blank(header[column]):
-
-            start = column
-
-        # IMPORTANT:
-        # Do not stop at blank columns.
-        #
-        # Blank columns may belong to the same table.
-        #
-        else:
-            continue
-
-    # --------------------------------------------------------
-    # Find last meaningful header on the RIGHT
-    # --------------------------------------------------------
-
-    end = invoice_column
-
-    for column in range(
-        invoice_column + 1,
-        column_count
-    ):
-
-        if not is_blank(header[column]):
-
-            end = column
-
-        # IMPORTANT:
-        # Continue through blank columns.
-        #
-        # This allows:
-        #
-        # BIL NO | blank | blank | ITEMS | SHOP ID
-        #
-        else:
-            continue
-
-    # --------------------------------------------------------
-    # Return Python slice
-    # --------------------------------------------------------
-
-    return (
-        start,
-        end + 1
-    )
-
-
-# ============================================================
 # FIND END OF THIS TABLE
-#
-# A table ends when:
-#
-# 1. Another header row for the SAME invoice column appears
-# 2. A new table with a different invoice column/header appears
-#    after sufficient separation
-#
-# We do NOT stop simply because there is one blank row.
 # ============================================================
 
 def find_table_end(
@@ -372,10 +247,7 @@ def find_table_end(
         )
 
     # --------------------------------------------------------
-    # Look for the next invoice/bill header.
-    #
-    # This is the safest boundary because the workbook can
-    # contain multiple tables vertically.
+    # The next Bill / Invoice header marks the next table.
     # --------------------------------------------------------
 
     for header in sorted(
@@ -388,6 +260,118 @@ def find_table_end(
             return header["row"]
 
     return total_rows
+
+
+# ============================================================
+# DETERMINE TABLE BOUNDARIES
+#
+# IMPORTANT:
+#
+# The Excel sheet may contain:
+#
+# SNO | BILL NUMBER | SHOP ID | SHOP NAME |
+# CAMERA | BNC | ADAPTER | DVR | HARDDISK
+#
+# The data may also contain blank columns.
+#
+# We therefore determine the table width from BOTH:
+#
+# 1. Header row
+# 2. All data rows belonging to this table
+#
+# This prevents the table from stopping at SHOP NAME.
+# ============================================================
+
+def find_table_boundaries(
+    rows,
+    header_row,
+    invoice_column,
+    end_row
+):
+
+    if header_row >= len(rows):
+
+        return (
+            invoice_column,
+            invoice_column + 1
+        )
+
+    # --------------------------------------------------------
+    # START COLUMN
+    # --------------------------------------------------------
+
+    header = list(
+        rows[header_row]
+    )
+
+    start = invoice_column
+
+    # Find first meaningful header on the left.
+    # Blank columns are allowed.
+
+    for column in range(
+        invoice_column - 1,
+        -1,
+        -1
+    ):
+
+        if column >= len(header):
+            continue
+
+        if not is_blank(header[column]):
+
+            start = column
+
+    # --------------------------------------------------------
+    # END COLUMN
+    #
+    # IMPORTANT FIX
+    #
+    # Do NOT rely only on the header row.
+    #
+    # Search every row belonging to this table and find
+    # the furthest used column.
+    # --------------------------------------------------------
+
+    end = invoice_column
+
+    search_end = min(
+        end_row,
+        len(rows)
+    )
+
+    for row_number in range(
+        header_row,
+        search_end
+    ):
+
+        row = list(
+            rows[row_number]
+        )
+
+        for column in range(
+            len(row) - 1,
+            end - 1,
+            -1
+        ):
+
+            if not is_blank(row[column]):
+
+                end = max(
+                    end,
+                    column
+                )
+
+                break
+
+    # --------------------------------------------------------
+    # Return Python slice
+    # --------------------------------------------------------
+
+    return (
+        start,
+        end + 1
+    )
 
 
 # ============================================================
@@ -415,17 +399,7 @@ def build_table(
     ]
 
     # --------------------------------------------------------
-    # Horizontal range
-    # --------------------------------------------------------
-
-    start_column, end_column = find_table_boundaries(
-        rows,
-        header_row,
-        invoice_column
-    )
-
-    # --------------------------------------------------------
-    # Vertical range
+    # FIRST determine vertical table boundary
     # --------------------------------------------------------
 
     end_row = find_table_end(
@@ -436,12 +410,36 @@ def build_table(
     )
 
     # --------------------------------------------------------
+    # THEN determine complete horizontal table boundary
+    #
+    # This is the important fix.
+    # --------------------------------------------------------
+
+    start_column, end_column = find_table_boundaries(
+        rows,
+        header_row,
+        invoice_column,
+        end_row
+    )
+
+    # --------------------------------------------------------
     # Get EXACT Excel header names
     # --------------------------------------------------------
 
     source_header_row = list(
         rows[header_row]
     )
+
+    # Make sure header row contains all required columns
+    if len(source_header_row) < end_column:
+
+        source_header_row.extend(
+            [None] *
+            (
+                end_column -
+                len(source_header_row)
+            )
+        )
 
     headers = source_header_row[
         start_column:end_column
@@ -486,7 +484,10 @@ def build_table(
             rows[row_number]
         )
 
+        # ----------------------------------------------------
         # Make sure row has enough columns
+        # ----------------------------------------------------
+
         if len(source_row) < end_column:
 
             source_row.extend(
@@ -532,7 +533,7 @@ def build_table(
             continue
 
         # ----------------------------------------------------
-        # Store complete table row
+        # Store COMPLETE table row
         # ----------------------------------------------------
 
         search_index[
@@ -621,7 +622,7 @@ def read_excel_file(
             rows = []
 
             # ------------------------------------------------
-            # Read complete sheet
+            # Read COMPLETE sheet
             # ------------------------------------------------
 
             for row in worksheet.iter_rows(
@@ -839,14 +840,6 @@ def safe_html(value):
 
 # ============================================================
 # DISPLAY TABLE
-#
-# We intentionally DO NOT use st.dataframe()
-# because Excel files can contain:
-#
-# - duplicate headers
-# - blank headers
-#
-# which can cause PyArrow errors.
 # ============================================================
 
 def display_excel_table(
@@ -871,13 +864,7 @@ def display_excel_table(
         )
 
     # --------------------------------------------------------
-    # Preserve blank Excel headers.
-    #
-    # DO NOT rename them to:
-    #
-    # Column 1
-    # Column 2
-    #
+    # Preserve blank Excel headers
     # --------------------------------------------------------
 
     while len(headers) < maximum_columns:
