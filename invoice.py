@@ -12,7 +12,7 @@ from openpyxl import load_workbook, Workbook
 
 
 # ============================================================
-# PAGE CONFIG
+# PAGE CONFIGURATION
 # ============================================================
 
 st.set_page_config(
@@ -212,6 +212,7 @@ def is_bill_invoice_header(value):
     # INOVICE NO
     # INV NUMBER
     #
+
     if (
         words.intersection(bill_words)
         and
@@ -237,11 +238,8 @@ def find_bill_invoice_headers(rows):
             if is_bill_invoice_header(value):
 
                 headers.append({
-
                     "row": row_index,
-
                     "column": column_index,
-
                     "value": value
                 })
 
@@ -251,13 +249,15 @@ def find_bill_invoice_headers(rows):
 # ============================================================
 # DETERMINE TABLE BOUNDARIES
 #
-# This handles tables like:
+# IMPORTANT FIX:
 #
-# S NO | ITEM | PURCHASE DATE | INVOICE NO | SHOP ID ...
+# Excel tables can have blank columns between headers.
 #
-# and:
+# Example:
 #
-# S NO | ITEM | PURCHASE DATE | INVOICE | SHOP ID ...
+# S NO | BIL NO |       |       | ITEMS | SHOP ID
+#
+# The blank columns must remain part of the table.
 #
 # ============================================================
 
@@ -281,38 +281,53 @@ def find_table_boundaries(
     column_count = len(header)
 
     # --------------------------------------------------------
-    # Find first meaningful header to LEFT
+    # Find first meaningful header on the LEFT
     # --------------------------------------------------------
 
     start = invoice_column
 
-    left = invoice_column - 1
+    for column in range(
+        invoice_column - 1,
+        -1,
+        -1
+    ):
 
-    while left >= 0:
+        if not is_blank(header[column]):
 
-        if is_blank(header[left]):
-            break
+            start = column
 
-        start = left
-
-        left -= 1
+        # IMPORTANT:
+        # Do not stop at blank columns.
+        #
+        # Blank columns may belong to the same table.
+        #
+        else:
+            continue
 
     # --------------------------------------------------------
-    # Find first meaningful header to RIGHT
+    # Find last meaningful header on the RIGHT
     # --------------------------------------------------------
 
     end = invoice_column
 
-    right = invoice_column + 1
+    for column in range(
+        invoice_column + 1,
+        column_count
+    ):
 
-    while right < column_count:
+        if not is_blank(header[column]):
 
-        if is_blank(header[right]):
-            break
+            end = column
 
-        end = right
-
-        right += 1
+        # IMPORTANT:
+        # Continue through blank columns.
+        #
+        # This allows:
+        #
+        # BIL NO | blank | blank | ITEMS | SHOP ID
+        #
+        else:
+            continue
 
     # --------------------------------------------------------
     # Return Python slice
@@ -359,8 +374,8 @@ def find_table_end(
     # --------------------------------------------------------
     # Look for the next invoice/bill header.
     #
-    # This is the safest boundary because your workbook has
-    # multiple tables vertically.
+    # This is the safest boundary because the workbook can
+    # contain multiple tables vertically.
     # --------------------------------------------------------
 
     for header in sorted(
@@ -368,14 +383,6 @@ def find_table_end(
         key=lambda x: x["row"]
     ):
 
-        # If another invoice/bill header occurs later,
-        # it represents another table.
-        #
-        # This is especially important for sheets such as:
-        #
-        # rows 54-80  -> SMS/0504/2021-22
-        # rows 84-89  -> SMS/0976/2021-22
-        #
         if header["row"] > header_row:
 
             return header["row"]
@@ -491,8 +498,6 @@ def build_table(
             )
 
         # ----------------------------------------------------
-        # IMPORTANT:
-        #
         # ONLY THIS TABLE'S COLUMNS
         # ----------------------------------------------------
 
@@ -724,7 +729,7 @@ def build_search_index(
 
     results.sort(
         key=lambda x:
-            x["filename"].lower()
+        x["filename"].lower()
     )
 
     return results
@@ -1065,8 +1070,10 @@ tr:hover td {
 
         table_html += (
             "<th>"
-            + safe_html(header)
-            + "</th>"
+            +
+            safe_html(header)
+            +
+            "</th>"
         )
 
     table_html += """
@@ -1106,8 +1113,10 @@ tr:hover td {
 
             table_html += (
                 "<td>"
-                + safe_html(value)
-                + "</td>"
+                +
+                safe_html(value)
+                +
+                "</td>"
             )
 
         table_html += "</tr>"
@@ -1535,7 +1544,8 @@ def display_results(
 
             key=(
                 "download_"
-                + str(
+                +
+                str(
                     abs(
                         hash(
                             (
